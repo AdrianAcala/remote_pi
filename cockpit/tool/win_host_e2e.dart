@@ -123,6 +123,10 @@ Future<void> main(List<String> args) async {
   );
   _check('handshake aceito', connection.isOpen);
 
+  if (args.contains('--bench')) {
+    await _bench('desktop (ssh -L)', connection, r'C:\\Users\\jacob');
+  }
+
   // C2b — o que o spike deixou em aberto: PTY REAL, com o servidor na sessão 0.
   final service = RemoteTerminalService(connection);
   final session = await service.open(
@@ -251,6 +255,10 @@ Future<void> _runMobile(
   );
   _check('mobile: handshake aceito', connection.isOpen);
 
+  if (_mobileArgs.contains('--bench')) {
+    await _bench('mobile (dartssh2)', connection, r'C:\\Users\\jacob');
+  }
+
   final service = RemoteTerminalService(connection);
   final session = await service.open(
     PtySpawnSpec(
@@ -301,4 +309,31 @@ Future<void> _runMobile(
   client.close();
   stdout.writeln(_failures == 0 ? 'MOBILE VERDE' : 'FALHOU');
   exit(_failures == 0 ? 0 : 1);
+}
+
+/// Mede N operações SEQUENCIAIS de arquivo sobre uma conexão já aberta.
+///
+/// Files/tasks/terminal travam JUNTOS no iPad, então o suspeito é o transporte
+/// compartilhado — e não o terminal. Aqui a comparação é justa: mesma máquina,
+/// mesmo host, mesmo servidor; muda só o caminho até ele.
+Future<void> _bench(
+  String label,
+  RemoteConnection connection,
+  String dir,
+) async {
+  final files = RemoteFileService(connection);
+  // Descarta a primeira: paga abertura de recursos do lado do servidor.
+  await files.list(dir);
+  final sw = Stopwatch()..start();
+  const rounds = 30;
+  var entries = 0;
+  for (var i = 0; i < rounds; i++) {
+    entries += (await files.list(dir)).length;
+  }
+  sw.stop();
+  final perOp = sw.elapsedMilliseconds / rounds;
+  stdout.writeln(
+    '       $label: ${sw.elapsedMilliseconds}ms / $rounds ops '
+    '= ${perOp.toStringAsFixed(1)}ms por op ($entries entradas)',
+  );
 }
