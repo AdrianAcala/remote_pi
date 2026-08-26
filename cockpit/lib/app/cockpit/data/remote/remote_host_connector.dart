@@ -402,10 +402,13 @@ class RemoteHostConnector {
       // Mesmo dialeto do desktop (plano 61), sobre o canal do dartssh2: o
       // mobile não instala servidor (decisão D do plano 58), mas precisa saber
       // ONDE ele escuta — e isso difere por família (socket UNIX vs porta+token).
+      // `runDetailed`, e não `run`: o `run` do dartssh2 mescla stderr no stdout
+      // e esconde o exit code, o que fazia o probe ler o erro do `cmd.exe` como
+      // se fosse a resposta de um POSIX. Ver o comentário em [runDetailed].
       Future<(int, String, String)> exec(
         String command, {
         List<int>? stdinBytes,
-      }) async => (0, await conn.run(command), '');
+      }) => conn.runDetailed(command);
 
       final probe = await probeHost(exec);
       if (probe == null) {

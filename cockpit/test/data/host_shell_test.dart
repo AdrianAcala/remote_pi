@@ -95,6 +95,22 @@ void main() {
       expect(exec.commands, hasLength(2));
     });
 
+    test('nao confia em 2 linhas quando o exit code nao e zero', () async {
+      // Regressao do iPad: o `run` do dartssh2 mescla stderr no stdout, entao
+      // o erro do `cmd.exe` ("'uname' nao e reconhecido...", DUAS linhas) tinha
+      // a forma exata de um POSIX que respondeu. Quem separa os dois casos e
+      // o exit code — por isso ele nao pode ser presumido zero.
+      final exec = _FakeExec(
+        (cmd) => cmd.startsWith('uname')
+            ? [(1, "'uname' nao e reconhecido\\nou externo, em lotes.", '')]
+            : [(0, '{"arch":"x64","home":"C:\\\\Users\\\\jacob"}', '')],
+      );
+      final probe = await probeHost(exec.call);
+
+      expect(probe!.family, HostOsFamily.windows);
+      expect(probe.home, r'C:\Users\jacob');
+    });
+
     test('devolve null quando nenhum dialeto responde', () async {
       final exec = _FakeExec((_) => [(127, '', 'no shell')]);
       expect(await probeHost(exec.call), isNull);
