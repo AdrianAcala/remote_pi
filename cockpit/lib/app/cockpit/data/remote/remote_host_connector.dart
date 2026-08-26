@@ -423,10 +423,23 @@ class RemoteHostConnector {
       }
       // Socket UNIX num host POSIX; porta de loopback num host Windows — o
       // `forwardLocal` do dartssh2 cobre os dois, o `forwardLocalUnix` não.
-      final channel = switch (remote) {
-        UnixSocketEndpoint(:final path) => await conn.forwardUnix(path),
-        TcpEndpoint(:final port) => await conn.forwardTcp(port),
-      };
+      // O rendezvous anuncia onde o servidor ESTAVA, não que ele ainda está:
+      // um servidor remoto que saiu por ociosidade deixa o arquivo pra trás,
+      // e no Windows ele é arquivo comum — não some com o processo. O desktop
+      // se recupera sozinho (falhou, faz bootstrap); o mobile não instala
+      // servidor (decisão D do plano 58), então aqui a única saída é dizer com
+      // todas as letras que não há ninguém atendendo, em vez de deixar vazar um
+      // `SSHChannelOpenError(2: open failed)` cru, que não diz nada a quem lê.
+      final channel =
+          await switch (remote) {
+            UnixSocketEndpoint(:final path) => conn.forwardUnix(path),
+            TcpEndpoint(:final port) => conn.forwardTcp(port),
+          }.onError<Object>((e, _) {
+            throw RemoteHostException(
+              RemoteHostErrorKind.serverInstallFailed,
+              'o host anunciou um servidor que não responde mais (rendezvous obsoleto): \$e',
+            );
+          });
       final connection = await RemoteConnection.connectOn(
         SshChannelDuplex(channel),
         clientName: 'cockpit-ipad',
