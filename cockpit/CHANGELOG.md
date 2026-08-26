@@ -24,6 +24,29 @@ As versões seguem o `version:` do `pubspec.yaml` (SSOT). O campo `notes` do
     linhas não-vazias — o começo da seção deve fazer sentido sozinho.
 -->
 
+## [1.28.13] - 2026-08-26
+
+**Still a beta for the upcoming 2.0.0.** Fixes for worktrees on remote
+workspaces, and the host's server finally updates itself.
+
+### Fixed
+
+- **The server on your host never updated.** Once installed, it stayed on that
+  version forever, so nothing the server learned later ever reached you — the
+  remote `cockpit` CLI answered nowhere and last release's Source Control fixes
+  never showed up. The app now notices an outdated binary, replaces it and
+  restarts it. **This closes the terminals open on that host, once, the first
+  time you connect after updating.**
+- **Clicking a worktree could show the parent workspace instead.** A hiccup on
+  the SSH connection was read as "this workspace has no worktrees", which
+  dropped them from the rail and moved your selection back to the parent.
+  Restarting the app appeared to fix it because the next listing worked.
+- **A worktree opened empty, losing its tabs.** Selecting one gave you a blank
+  pane instead of the layout you left there, and a `claude` running in it never
+  came back. Its saved layout was only read at startup, before worktrees were
+  known — and, worse, the scrollback of its terminals was being deleted on every
+  launch. Both fixed, for local and remote worktrees.
+
 ## [1.28.12] - 2026-08-26
 
 **Still a beta for the upcoming 2.0.0.** Remote workspaces catch up with local
