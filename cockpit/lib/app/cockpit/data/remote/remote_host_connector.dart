@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' show sha256;
+
 import 'package:cockpit/app/cockpit/data/remote/dartssh_host_connection.dart';
 import 'package:cockpit/app/cockpit/data/remote/ssh_channel_duplex.dart';
 import 'package:cockpit/app/cockpit/data/remote/ssh_known_hosts.dart';
@@ -218,8 +220,20 @@ class RemoteHostConnector {
 
     _setPhase(RemoteHostPhase.connecting);
     var connection = await _tryProtocol(tunnel);
+    // Servidor VELHO respondendo: sem esta checagem o cliente conectava nele e
+    // pronto — o bootstrap só rodava quando ninguém atendia, então um host
+    // instalado uma vez ficava congelado para sempre naquela versão. Uma vez
+    // por host por sessão (a comparação custa um SSH).
+    if (connection != null && !_serverFreshnessChecked) {
+      _serverFreshnessChecked = true;
+      if (await _remoteServerIsStale()) {
+        _staleServer = true;
+        await connection.close();
+        connection = null;
+      }
+    }
     if (connection == null) {
-      // Servidor ausente/parado no host: bootstrap pelo próprio SSH.
+      // Servidor ausente/parado/desatualizado no host: bootstrap pelo SSH.
       _setPhase(RemoteHostPhase.installingServer);
       await _installAndStartServer();
       connection = await _tryProtocol(tunnel, attempts: 20);
@@ -385,6 +399,48 @@ class RemoteHostConnector {
 
   /// Caminho do servidor no host (sempre o mesmo layout, qualquer plataforma).
   static const _remoteServerBin = r'$HOME/.cockpit/server/bin/cockpit-server';
+
+  /// `true` quando o binário do host **existe mas é diferente** do que este
+  /// cliente instalaria: o processo velho precisa morrer para o novo valer.
+  bool _staleServer = false;
+
+  /// A comparação de versão do servidor roda uma vez por host por sessão —
+  /// reconectar (o que acontece a cada oscilação de rede) não paga o SSH extra
+  /// de novo.
+  bool _serverFreshnessChecked = false;
+
+  /// Compara o `cockpit-server` do host com o que este cliente enviaria.
+  /// Falha de qualquer lado (sem `sha256sum`/`shasum`, sem binário local)
+  /// responde `false`: na dúvida, não mexe num servidor que está funcionando.
+  Future<bool> _remoteServerIsStale() async {
+    final local = localServerBinaryResolver(arch: _lastRemoteArch ?? 'x64');
+    if (local == null || !File(local).existsSync()) return false;
+    final localDigest = sha256.convert(await File(local).readAsBytes());
+    // `sha256sum` (Linux) e `shasum -a 256` (macOS) — o primeiro que existir.
+    final (code, out, _) = await SshTunnel.capture(
+      host.sshTarget,
+      '(sha256sum $_remoteServerBin 2>/dev/null || '
+      'shasum -a 256 $_remoteServerBin 2>/dev/null) | cut -d" " -f1',
+      port: host.port,
+      password: _password,
+      identityFile: host.effectiveIdentityFile,
+    );
+    final remoteDigest = out.trim();
+    if (code != 0 || remoteDigest.isEmpty) return false;
+    return remoteDigest != '$localDigest';
+  }
+
+  /// Arquitetura do host descoberta pelo `uname` desta conexão — o resolver do
+  /// binário local precisa dela antes da comparação de hash.
+  String? _lastRemoteArch;
+
+  /// Nome do SO **deste** cliente no vocabulário do `uname`.
+  static String get _localOsName => Platform.isMacOS
+      ? 'darwin'
+      : Platform.isLinux
+      ? 'linux'
+      : 'windows';
+
   Future<void> _installAndStartServer() async {
     // Plataforma do HOST decide tudo: qual fatia enviar e o nome da lib do
     // PTY. `uname -sm` → "Darwin arm64", "Linux x86_64", ...
@@ -401,6 +457,15 @@ class RemoteHostConnector {
         unameErr.isEmpty ? 'uname failed' : unameErr,
       );
     }
+    final parts = uname.split(RegExp(r'\s+'));
+    final remoteOs = parts.isEmpty ? '' : parts.first.toLowerCase();
+    final remoteMachine = parts.length > 1 ? parts[1].toLowerCase() : '';
+    final remoteArch =
+        remoteMachine.contains('arm') || remoteMachine == 'aarch64'
+        ? 'arm64'
+        : 'x64';
+    _lastRemoteArch = remoteArch;
+
     // Servidor JÁ instalado no host: só falta subir. Isto é o que permite um
     // cliente Windows reusar o servidor de um Mac (o binário está lá desde a
     // instalação feita por outro cliente) — empurrar um exe de Windows pra um
@@ -412,23 +477,23 @@ class RemoteHostConnector {
       password: _password,
       identityFile: host.effectiveIdentityFile,
     );
-    final alreadyInstalled = probeCode == 0 && probeOut.endsWith('yes');
-
-    final parts = uname.split(RegExp(r'\s+'));
-    final remoteOs = parts.isEmpty ? '' : parts.first.toLowerCase();
-    final remoteMachine = parts.length > 1 ? parts[1].toLowerCase() : '';
-    final remoteArch =
-        remoteMachine.contains('arm') || remoteMachine == 'aarch64'
-        ? 'arm64'
-        : 'x64';
+    var alreadyInstalled = probeCode == 0 && probeOut.endsWith('yes');
+    // ...mas "instalado" não quer dizer "atualizado". O binário do host ficava
+    // congelado na versão que o instalou pela PRIMEIRA vez: quem já usava
+    // remoto nunca via nada que o servidor passasse a fazer depois (o `-uall`
+    // do status, o receptor de comandos da CLI). Compara pelo conteúdo — o
+    // servidor não carrega versão própria (anuncia '0.1.0' fixo), e o hash
+    // funciona com qualquer servidor já instalado lá fora.
+    if (alreadyInstalled &&
+        remoteOs == _localOsName &&
+        await _remoteServerIsStale()) {
+      alreadyInstalled = false;
+      _staleServer = true;
+    }
     // Cross-OS não tem como funcionar: o bundle local só traz binário desta
     // plataforma. Antes o Mach-O do macOS era empurrado pra qualquer host e o
     // servidor morria no `nohup` sem deixar rastro.
-    final localOs = Platform.isMacOS
-        ? 'darwin'
-        : Platform.isLinux
-        ? 'linux'
-        : 'windows';
+    final localOs = _localOsName;
     // Instalar exige binário DESTA plataforma pro host; iniciar, não.
     if (!alreadyInstalled && remoteOs != localOs) {
       throw RemoteHostException(
@@ -473,9 +538,26 @@ class RemoteHostConnector {
       }
     }
 
-    // Instalação (só quando o host ainda não tem o servidor). Com ele já lá,
-    // pula direto pro start — é o que deixa um cliente de OUTRO sistema
-    // (Windows falando com um Mac) reusar o que outro cliente instalou.
+    // Servidor desatualizado: o processo VELHO ainda está no ar (ele sobrevive
+    // à desconexão por causa do `--idle-keeps-sessions`) e continuaria
+    // atendendo mesmo depois de trocarmos o arquivo. Derruba antes de
+    // sobrescrever — custa as sessões de PTY abertas naquele host, e é por
+    // isso que só acontece quando o binário realmente mudou.
+    if (_staleServer) {
+      await SshTunnel.run(
+        host.sshTarget,
+        'pkill -f "$_remoteServerBin" || true',
+        port: host.port,
+        password: _password,
+        identityFile: host.effectiveIdentityFile,
+      );
+      _staleServer = false;
+    }
+
+    // Instalação (só quando o host ainda não tem o servidor, ou tem um
+    // desatualizado). Com ele já lá e igual, pula direto pro start — é o que
+    // deixa um cliente de OUTRO sistema (Windows falando com um Mac) reusar o
+    // que outro cliente instalou.
     if (bundleRoot != null && binary != null) {
       final libDir = Directory('$bundleRoot/lib');
       // Nome SEM sufixo de arquitetura no host: lá o bundle é de uma
@@ -501,8 +583,11 @@ class RemoteHostConnector {
         }
       }
       // CLI `cockpit` ao lado do server (plano 60, Wave G): o server a acha
-      // via _besideServer e instala o hook do agente no ~/.claude do host. Só
-      // se estiver no bundle local (build_server.sh a embarca).
+      // via _besideServer, instala o hook do agente no ~/.claude do host e põe
+      // a pasta dela no PATH das PTYs — é o que faz `cockpit …` responder num
+      // terminal remoto. Vai junto em toda (re)instalação, senão o binário da
+      // CLI ficaria mais velho que o servidor que o invoca. Só se estiver no
+      // bundle local (build_server.sh a embarca).
       final cliLocal = File('$bundleRoot/bin/cockpit');
       if (cliLocal.existsSync()) {
         await push(cliLocal.path, '~/.cockpit/server/bin/cockpit');
