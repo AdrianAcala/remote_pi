@@ -25,6 +25,7 @@ import 'package:cockpit_core/cockpit_core.dart';
 import 'package:cockpit_remote/cockpit_remote.dart';
 
 var _failures = 0;
+List<String> _mobileArgs = const [];
 
 void _check(String label, bool ok, [String detail = '']) {
   stdout.writeln(
@@ -95,6 +96,7 @@ Future<void> main(List<String> args) async {
   // macOS contra este mesmo host e não no iPad: se o input morrer aqui, o
   // culpado é o transporte, não o servidor.
   if (args.contains('--mobile')) {
+    _mobileArgs = args;
     await _runMobile(target, port, identity, endpoint);
     return;
   }
@@ -223,6 +225,11 @@ Future<void> _runMobile(
   String? identity,
   TcpEndpoint endpoint,
 ) async {
+  // --cwd: reproduz o workingDirectory que o picker remoto produz. Ele é
+  // POSIX hardcoded, então num host Windows sai com separador MISTO
+  // (`C:\\Users\\jacob/pasta`) e, ao subir um nível, vira `/`.
+  final cwdIndex = _mobileArgs.indexOf('--cwd');
+  final cwd = cwdIndex >= 0 ? _mobileArgs[cwdIndex + 1] : null;
   final user = target.split('@').first;
   final host = target.split('@').last;
   final socket = await SSHSocket.connect(host, port);
@@ -246,9 +253,10 @@ Future<void> _runMobile(
 
   final service = RemoteTerminalService(connection);
   final session = await service.open(
-    const PtySpawnSpec(
+    PtySpawnSpec(
       executable: '',
-      environment: {'TERM': 'xterm-256color', 'COLORTERM': 'truecolor'},
+      workingDirectory: cwd,
+      environment: const {'TERM': 'xterm-256color', 'COLORTERM': 'truecolor'},
       flowControlled: true,
       rows: 24,
       columns: 80,
