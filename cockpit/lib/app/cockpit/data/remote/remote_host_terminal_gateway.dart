@@ -274,14 +274,32 @@ class RemoteHostTerminalGateway implements TerminalGateway {
     if (!_output.isClosed) _output.close();
   }
 
+  /// Quantos writes já saíram — só para o primeiro deixar rastro.
+  int _writes = 0;
+
   @override
-  void write(List<int> data) => _run(() {
-    final id = _sessionId;
-    if (id == null) return;
-    unawaited(
-      _service?.write(id, data is Uint8List ? data : Uint8List.fromList(data)),
-    );
-  });
+  void write(List<int> data) {
+    // A PRIMEIRA tecla é registrada: separa "o teclado não chega no
+    // gateway" de "chega e é bloqueado". Sem esta linha, os dois casos
+    // produzem exatamente o mesmo silêncio no log.
+    if (_writes++ == 0) {
+      DiagnosticsLog.instance.log(
+        'remote-term',
+        'primeiro write da aba: ${data.length}B, sessão=$_sessionId, '
+            'ready=$_ready, detached=$_detached',
+      );
+    }
+    _run(() {
+      final id = _sessionId;
+      if (id == null) return;
+      unawaited(
+        _service?.write(
+          id,
+          data is Uint8List ? data : Uint8List.fromList(data),
+        ),
+      );
+    });
+  }
 
   @override
   void resize(int rows, int columns) {
