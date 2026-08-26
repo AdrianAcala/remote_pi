@@ -125,6 +125,11 @@ Future<void> main(List<String> args) async {
       // deixava a aba do iPad vazia — num host Windows o servidor caía no
       // fallback POSIX `/bin/sh -l`, que não existe lá.
       executable: '',
+      // Mesmos parâmetros do cliente remoto real
+      // (`remote_host_terminal_gateway`): sem eles o teste exercitava um
+      // modo que nenhum cliente usa.
+      environment: {'TERM': 'xterm-256color', 'COLORTERM': 'truecolor'},
+      flowControlled: true,
       rows: 24,
       columns: 80,
     ),
@@ -136,6 +141,9 @@ Future<void> main(List<String> args) async {
   final sub = service.attach(session.id).listen((event) {
     if (event is PtyOutputEvent) {
       output.write(utf8.decode(event.chunk.bytes, allowMalformed: true));
+      // Flow control: sem devolver crédito por chunk consumido, a leitura
+      // no servidor trava depois da primeira janela e a saída seca.
+      unawaited(service.ack(session.id, event.chunk.bytes.length));
       if (output.length > 0 && !done.isCompleted) done.complete();
     }
   });
@@ -149,10 +157,35 @@ Future<void> main(List<String> args) async {
     if (line.trim().isNotEmpty) stdout.writeln('       | ${line.trim()}');
   }
 
-  // Escrita de volta prova o caminho completo, não só a leitura.
-  await service.write(session.id, Uint8List.fromList(utf8.encode('cd\r\n')));
-  await Future<void>.delayed(const Duration(seconds: 2));
-  _check('PTY aceita input', output.length > 0);
+  // Round-trip de INPUT: digita um comando e exige ver o resultado dele.
+  //
+  // O check anterior aqui era `output.length > 0`, que só reafirmava que
+  // ALGO tinha saído antes — passava mesmo com a digitação sendo ignorada,
+  // que é exatamente o bug que ele deveria pegar. Um teste que não pode
+  // falhar não é teste.
+  final before = output.length;
+  final echoed = Completer<void>();
+  final watcher = Timer.periodic(const Duration(milliseconds: 200), (t) {
+    if (output.toString().contains('INPUT_ROUNDTRIP_OK') &&
+        !echoed.isCompleted) {
+      echoed.complete();
+      t.cancel();
+    }
+  });
+  await service.write(
+    session.id,
+    Uint8List.fromList(utf8.encode('echo INPUT_ROUNDTRIP_OK\r')),
+  );
+  await echoed.future.timeout(
+    const Duration(seconds: 12),
+    onTimeout: () => stdout.writeln('       (timeout esperando eco do input)'),
+  );
+  watcher.cancel();
+  _check(
+    'input digitado chega no shell e ecoa',
+    output.toString().contains('INPUT_ROUNDTRIP_OK'),
+    'bytes novos: ${output.length - before}',
+  );
 
   await sub.cancel();
   await service.kill(session.id);
