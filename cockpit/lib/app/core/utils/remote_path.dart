@@ -56,3 +56,21 @@ String remotePathJoin(String dir, String name) {
   if (dir.endsWith('/') || dir.endsWith(r'\')) return '$dir$name';
   return '$dir${remotePathSeparator(dir)}$name';
 }
+
+/// Último componente de [path] — o nome que a UI mostra para um workspace
+/// pinado.
+///
+/// Lê os dois separadores pelo mesmo motivo do [remotePathParent]: em
+/// `C:\\Users\\jacob\\projeto`, procurar só por `/` devolvia o caminho INTEIRO
+/// como nome do pin.
+String remotePathBasename(String path) {
+  var trimmed = path;
+  while (trimmed.length > 1 &&
+      (trimmed.endsWith('/') || trimmed.endsWith(r'\'))) {
+    trimmed = trimmed.substring(0, trimmed.length - 1);
+  }
+  final slash = trimmed.lastIndexOf('/');
+  final backslash = trimmed.lastIndexOf(r'\');
+  final idx = slash > backslash ? slash : backslash;
+  return idx < 0 ? trimmed : trimmed.substring(idx + 1);
+}

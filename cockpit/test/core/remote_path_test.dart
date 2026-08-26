@@ -61,6 +61,23 @@ void main() {
     });
   });
 
+  group('basename (nome do pin)', () {
+    test('host Windows usa o último componente, não o caminho todo', () {
+      // Procurar só por `/` fazia o pin aparecer como o caminho inteiro.
+      expect(remotePathBasename(r'C:\Users\jacob\projeto'), 'projeto');
+      expect(remotePathBasename(r'C:\Users\jacob\projeto\'), 'projeto');
+    });
+
+    test('host POSIX segue igual', () {
+      expect(remotePathBasename('/Users/jacob/projeto'), 'projeto');
+      expect(remotePathBasename('/Users/jacob/projeto/'), 'projeto');
+    });
+
+    test('caminho misto também', () {
+      expect(remotePathBasename(r'C:\Users\jacob/projeto'), 'projeto');
+    });
+  });
+
   test('família vem do caminho, nunca do cliente', () {
     // O picker navega o filesystem do HOST: um iPad abrindo um host Windows
     // precisa de `\`, e um cliente Windows abrindo um host Linux precisa de `/`.
