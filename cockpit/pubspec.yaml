@@ -372,10 +372,10 @@ dependency_overrides:
   flterm:
     git:
       url: https://github.com/jacobaraujo7/libghostty.git
-      ref: cockpit-pin-flterm-ios-recover
+      ref: 3dc78a42b016ba90ef36f50f16f3c28e4a706f50
       path: packages/flterm
   libghostty:
     git:
       url: https://github.com/jacobaraujo7/libghostty.git
-      ref: cockpit-pin-flterm-ios-recover
+      ref: 3dc78a42b016ba90ef36f50f16f3c28e4a706f50
       path: packages/libghostty

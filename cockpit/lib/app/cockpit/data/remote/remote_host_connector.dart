@@ -38,6 +38,13 @@ enum RemoteHostErrorKind {
   /// verification failed` e não havia caminho nenhum pela GUI.
   hostKeyUnknown,
 
+  /// O host é Windows. O servidor remoto só existe para POSIX hoje: todo o
+  /// bootstrap fala `uname`, `$HOME/.cockpit/...`, `nohup`, `ln -sf` e socket
+  /// UNIX. Sem este erro, a falha aparecia como um `FormatException` de
+  /// decodificação (o cmd responde na codepage local, não em UTF-8) — que não
+  /// dizia nada ao usuário.
+  windowsHostUnsupported,
+
   /// O host apresenta chave diferente da que está no `known_hosts`. Não existe
   /// aceite inline: ou é troca legítima de servidor (o usuário edita o
   /// known_hosts) ou é ataque.
@@ -317,7 +324,14 @@ class RemoteHostConnector {
 
     _setPhase(RemoteHostPhase.connecting);
     try {
-      final home = await conn.run(r'printf %s "$HOME"');
+      // `printf`/`$HOME` são POSIX: num host Windows isto falha (ou devolve
+      // lixo) e o forward do socket UNIX nunca ia funcionar de qualquer jeito.
+      final home = (await conn.run(r'printf %s "$HOME"')).trim();
+      if (home.isEmpty || !home.startsWith('/')) {
+        throw const RemoteHostException(
+          RemoteHostErrorKind.windowsHostUnsupported,
+        );
+      }
       final remoteSocket = '$home/.cockpit/cockpit-server.sock';
       final channel = await conn.forwardUnix(remoteSocket);
       final connection = await RemoteConnection.connectOn(
@@ -430,6 +444,20 @@ class RemoteHostConnector {
     return remoteDigest != '$localDigest';
   }
 
+  /// `true` quando o host responde como Windows. Só é chamado depois de o
+  /// `uname` falhar — `%OS%` é expandido pelo cmd e não existe em shell POSIX,
+  /// então a resposta `Windows_NT` é conclusiva.
+  Future<bool> _looksLikeWindowsHost() async {
+    final (code, out, _) = await SshTunnel.capture(
+      host.sshTarget,
+      'echo %OS%',
+      port: host.port,
+      password: _password,
+      identityFile: host.effectiveIdentityFile,
+    );
+    return code == 0 && out.trim().toLowerCase().contains('windows');
+  }
+
   /// Arquitetura do host descoberta pelo `uname` desta conexão — o resolver do
   /// binário local precisa dela antes da comparação de hash.
   String? _lastRemoteArch;
@@ -452,6 +480,11 @@ class RemoteHostConnector {
       identityFile: host.effectiveIdentityFile,
     );
     if (unameCode != 0) {
+      if (await _looksLikeWindowsHost()) {
+        throw const RemoteHostException(
+          RemoteHostErrorKind.windowsHostUnsupported,
+        );
+      }
       throw RemoteHostException(
         RemoteHostErrorKind.serverInstallFailed,
         unameErr.isEmpty ? 'uname failed' : unameErr,
@@ -591,6 +624,16 @@ class RemoteHostConnector {
       final cliLocal = File('$bundleRoot/bin/cockpit');
       if (cliLocal.existsSync()) {
         await push(cliLocal.path, '~/.cockpit/server/bin/cockpit');
+        // Alias curto, igual ao do cliente: um symlink ao lado do binário (o
+        // host é POSIX — o bootstrap remoto só instala em darwin/linux). Falha
+        // aqui não interrompe nada; o `cockpit` continua valendo.
+        await SshTunnel.run(
+          host.sshTarget,
+          'ln -sf cockpit ~/.cockpit/server/bin/ck',
+          port: host.port,
+          password: _password,
+          identityFile: host.effectiveIdentityFile,
+        );
       }
     }
 
