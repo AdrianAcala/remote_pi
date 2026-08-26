@@ -145,6 +145,24 @@ class DartSshHostConnection {
         );
   }
 
+  /// Encaminha pra uma porta de LOOPBACK remota (`direct-tcpip`) e devolve o
+  /// canal duplex.
+  ///
+  /// É o caminho de host Windows (plano 61): lá o `cockpit-server` não cria
+  /// socket UNIX — `dart:io` não tem AF_UNIX no Windows —, escuta em TCP de
+  /// loopback e anuncia porta+token num arquivo de rendezvous. O
+  /// `forwardLocalUnix` não serve para esse caso.
+  Future<SSHForwardChannel> forwardTcp(int port) async {
+    final client = _client;
+    if (client == null) throw const DartSshException('ssh_not_connected');
+    return client
+        .forwardLocal('127.0.0.1', port)
+        .timeout(
+          _connectTimeout,
+          onTimeout: () => throw const DartSshException('ssh_forward_timeout'),
+        );
+  }
+
   /// Executa um comando no host e devolve o stdout (trim). Usado só pra
   /// resolver caminhos (ex.: `$HOME`) — o mobile não faz bootstrap (decisão D).
   Future<String> run(String command) async {
