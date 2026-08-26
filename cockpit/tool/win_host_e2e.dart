@@ -18,7 +18,9 @@ import 'dart:typed_data';
 
 import 'package:cockpit/app/cockpit/data/remote/host_shell/host_shell.dart';
 import 'package:cockpit/app/cockpit/data/remote/host_shell/windows_host_shell.dart';
+import 'package:cockpit/app/cockpit/data/remote/ssh_channel_duplex.dart';
 import 'package:cockpit/app/cockpit/data/remote/ssh_tunnel.dart';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:cockpit_core/cockpit_core.dart';
 import 'package:cockpit_remote/cockpit_remote.dart';
 
@@ -86,6 +88,16 @@ Future<void> main(List<String> args) async {
   }
   _check('token presente', endpoint.token != null);
   stdout.writeln('       port=${endpoint.port}');
+
+  // Transporte MOBILE (`--mobile`): dartssh2 + SshChannelDuplex, a pilha do
+  // iPad. É a única diferença estrutural entre os dois clientes — o desktop
+  // usa o `ssh` do sistema com `-L`. Existe porque o terminal funciona no
+  // macOS contra este mesmo host e não no iPad: se o input morrer aqui, o
+  // culpado é o transporte, não o servidor.
+  if (args.contains('--mobile')) {
+    await _runMobile(target, port, identity, endpoint);
+    return;
+  }
 
   // B2 — túnel TCP↔TCP.
   final tunnel = await SshTunnel.open(
@@ -202,4 +214,83 @@ Future<void> main(List<String> args) async {
 String? _optionOf(List<String> args, String name) {
   final i = args.indexOf(name);
   return (i >= 0 && i + 1 < args.length) ? args[i + 1] : null;
+}
+
+/// Mesmo roteiro do caminho desktop, mas sobre o transporte do MOBILE.
+Future<void> _runMobile(
+  String target,
+  int port,
+  String? identity,
+  TcpEndpoint endpoint,
+) async {
+  final user = target.split('@').first;
+  final host = target.split('@').last;
+  final socket = await SSHSocket.connect(host, port);
+  final client = SSHClient(
+    socket,
+    username: user,
+    identities: SSHKeyPair.fromPem(await File(identity!).readAsString()),
+  );
+  await client.authenticated;
+  _check('mobile: autenticou', true);
+
+  final channel = await client.forwardLocal('127.0.0.1', endpoint.port);
+  _check('mobile: forwardLocal abriu', true);
+
+  final connection = await RemoteConnection.connectOn(
+    SshChannelDuplex(channel),
+    clientName: 'cockpit-ipad',
+    token: endpoint.token,
+  );
+  _check('mobile: handshake aceito', connection.isOpen);
+
+  final service = RemoteTerminalService(connection);
+  final session = await service.open(
+    const PtySpawnSpec(
+      executable: '',
+      environment: {'TERM': 'xterm-256color', 'COLORTERM': 'truecolor'},
+      flowControlled: true,
+      rows: 24,
+      columns: 80,
+    ),
+  );
+  _check('mobile: PTY aberto', session.pid > 0, 'pid=${session.pid}');
+
+  final output = StringBuffer();
+  final echoed = Completer<void>();
+  final sub = service.attach(session.id).listen((event) {
+    if (event is PtyOutputEvent) {
+      output.write(utf8.decode(event.chunk.bytes, allowMalformed: true));
+      unawaited(service.ack(session.id, event.chunk.bytes.length));
+      if (output.toString().contains('INPUT_ROUNDTRIP_OK') &&
+          !echoed.isCompleted) {
+        echoed.complete();
+      }
+    }
+  });
+
+  await Future<void>.delayed(const Duration(seconds: 2));
+  _check('mobile: shell produziu saida', output.isNotEmpty);
+
+  await service.write(
+    session.id,
+    Uint8List.fromList(utf8.encode('echo INPUT_ROUNDTRIP_OK\r')),
+  );
+  await echoed.future.timeout(
+    const Duration(seconds: 12),
+    onTimeout: () => stdout.writeln('       (timeout esperando eco do input)'),
+  );
+  _check(
+    'mobile: input digitado ecoa',
+    output.toString().contains('INPUT_ROUNDTRIP_OK'),
+  );
+  for (final line in const LineSplitter().convert(output.toString())) {
+    if (line.trim().isNotEmpty) stdout.writeln('       | ${line.trim()}');
+  }
+
+  await sub.cancel();
+  await connection.close();
+  client.close();
+  stdout.writeln(_failures == 0 ? 'MOBILE VERDE' : 'FALHOU');
+  exit(_failures == 0 ? 0 : 1);
 }
