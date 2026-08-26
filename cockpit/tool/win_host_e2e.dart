@@ -120,14 +120,11 @@ Future<void> main(List<String> args) async {
       // em UTF-8, o que sai do shell é UTF-8 de verdade, e é o CAMINHO (ConPTY
       // → servidor → protocolo → túnel → cliente) que fica sob teste, que é o
       // que este script existe para verificar.
-      executable: 'powershell.exe',
-      arguments: [
-        '-NoProfile',
-        '-Command',
-        '[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); '
-            "Write-Output 'COCKPIT_PTY_OK'; "
-            "Write-Output 'acento: configuração'",
-      ],
+      // `executable` VAZIO: é exatamente o que o cliente remoto manda para
+      // "login shell do host" (`TerminalProfile.hostLoginShell`), e o caso que
+      // deixava a aba do iPad vazia — num host Windows o servidor caía no
+      // fallback POSIX `/bin/sh -l`, que não existe lá.
+      executable: '',
       rows: 24,
       columns: 80,
     ),
@@ -139,37 +136,17 @@ Future<void> main(List<String> args) async {
   final sub = service.attach(session.id).listen((event) {
     if (event is PtyOutputEvent) {
       output.write(utf8.decode(event.chunk.bytes, allowMalformed: true));
-      // Espera a ÚLTIMA linha, não a primeira: completar no marcador
-      // inicial e checar o acento em seguida testava só quem chegou antes.
-      if (output.toString().contains('configuração') && !done.isCompleted) {
-        done.complete();
-      }
+      if (output.length > 0 && !done.isCompleted) done.complete();
     }
   });
   await done.future.timeout(
     const Duration(seconds: 15),
     onTimeout: () => stdout.writeln('       (timeout esperando saída do PTY)'),
   );
-  _check('ConPTY produziu saída', output.toString().contains('COCKPIT_PTY_OK'));
-  // ACHADO, fora do escopo do plano 61: o acento volta re-codificado
-  // (`configuraￃﾧￃﾣo` — os bytes UTF-8 C3 A7 do `ç` chegam como U+FFC3
-  // U+FFA7). Nada no caminho do plano 61 re-codifica: o túnel é TCP
-  // byte-transparente e o protocolo carrega `PtyOutput.bytes` crus, então
-  // a deformação nasce na leitura do ConPTY, no servidor — o MESMO código
-  // que o sidecar local do Windows usa. Fica como aviso, não como falha
-  // deste script, até ser confirmado no caminho local e ganhar plano
-  // próprio.
-  final sawAccent = output.toString().contains('configuração');
-  if (!sawAccent) {
-    stdout.writeln('  WARN  acento re-codificado no PTY (bug à parte)');
-  } else {
-    _check('UTF-8 atravessa o PTY', true);
-  }
-  if (!sawAccent) {
-    stdout.writeln('       --- saida crua do PTY ---');
-    for (final line in const LineSplitter().convert(output.toString())) {
-      if (line.trim().isNotEmpty) stdout.writeln('       | ${line.trim()}');
-    }
+  _check('login shell do host abriu e produziu saída', output.isNotEmpty);
+  // O que o shell do host cuspiu — evidência de QUAL shell abriu.
+  for (final line in const LineSplitter().convert(output.toString())) {
+    if (line.trim().isNotEmpty) stdout.writeln('       | ${line.trim()}');
   }
 
   // Escrita de volta prova o caminho completo, não só a leitura.
